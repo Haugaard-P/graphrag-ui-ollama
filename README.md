@@ -28,7 +28,7 @@ The application consists of the following components:
 ## Prerequisites
 
 - Docker and Docker Compose
-- Access to a local Ollama instance running on http://192.168.6.150:11434 (or modify the configuration to use your own Ollama instance)
+- Access to a local Ollama instance running on http://<ollama ip>:11434 (or modify the configuration to use your own Ollama instance)
 
 ## Quick Start
 
