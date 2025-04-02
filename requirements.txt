@@ -1,0 +1,25 @@
+# Core dependencies
+fastapi==0.104.1
+uvicorn==0.23.2
+python-multipart==0.0.6
+pydantic==2.4.2
+httpx==0.25.0
+langchain==0.0.335
+langchain-community==0.0.13
+langchain-core>=0.1.9,<0.2.0
+networkx==3.2.1
+matplotlib==3.8.0
+numpy==1.26.1
+pandas==2.1.2
+pyvis==0.3.2
+
+# Graph database for GraphRAG
+neo4j==5.14.1
+py2neo==2021.2.4
+
+# Document processing
+pypdf==4.0.1
+docx2txt==0.8
+
+# UI
+streamlit==1.28.1
