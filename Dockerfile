@@ -19,7 +19,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
-#COPY sample_data.txt .
 
 # Create directories for data persistence
 RUN mkdir -p /app/uploads
