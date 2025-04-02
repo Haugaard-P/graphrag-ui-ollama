@@ -154,14 +154,18 @@ class GraphRAGRetriever:
              END AS relevance_score
         // First, get top chunks per document to ensure document diversity
         WITH d, c, entities, relevance_score
-        ORDER BY d.id, relevance_score DESC
-        WITH d, collect({chunk: c, score: relevance_score, entities: entities})[0..5] AS top_chunks_per_doc
+        ORDER BY relevance_score DESC
+        // Group by document and collect top chunks for each document
+        WITH d, collect({chunk: c, score: relevance_score, entities: entities})[0..3] AS top_chunks_per_doc
+        // Unwind to get individual chunks back
         UNWIND top_chunks_per_doc AS chunk_data
         WITH chunk_data.chunk AS c, d, chunk_data.entities AS entities, chunk_data.score AS relevance_score
+        // Return results from all documents, sorted by relevance
         RETURN 
             c.content AS content, 
             c.id AS id, 
             d.name AS source, 
+            d.id AS doc_id,
             relevance_score AS score,
             entities
         ORDER BY relevance_score DESC
@@ -177,11 +181,12 @@ class GraphRAGRetriever:
                 # Convert to Documents with enhanced metadata
                 documents = []
                 for record in result:
-                    # Create enhanced metadata with entities
+                    # Create enhanced metadata with entities and document ID
                     metadata = {
                         "source": record["source"],
                         "score": record["score"],
                         "chunk_id": record["id"],
+                        "doc_id": record["doc_id"],  # Include document ID in metadata
                         "entities": record["entities"]
                     }
                     
@@ -232,7 +237,14 @@ def get_llm():
     try:
         # Use the newer API for creating the LLM
         from langchain_community.llms.ollama import Ollama
-        return Ollama(base_url="http://192.168.6.150:11434", model="llama3.1")
+        return Ollama(
+            base_url="http://192.168.6.150:11434",
+            model="llama3.1",
+            temperature=0.7,  # Slightly higher temperature for more detailed responses
+            num_ctx=4096,  # Larger context window for longer responses
+            top_k=10,  # More diverse token selection
+            repeat_penalty=1.1  # Reduce repetition
+        )
     except Exception as e:
         st.error(f"Error initializing LLM: {str(e)}")
         return None
@@ -696,8 +708,269 @@ def visualize_neo4j_graph():
     
     return html
 
+# Initialize file queue session state variables
+if "file_queue" not in st.session_state:
+    st.session_state.file_queue = []
+if "processing" not in st.session_state:
+    st.session_state.processing = False
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = []
+
 # Main UI - simplified for better performance
 st.title("📊 GraphRAG")
+
+# Create tabs for different views
+tab1, tab2 = st.tabs(["Chat", "Knowledge Graph"])
+
+# Chat input - must be outside of tabs
+user_query = st.chat_input("Ask a question about your documents...")
+
+# Chat tab
+with tab1:
+    # Check if conversation is ready
+    if st.session_state.conversation_ready:
+        # Create a container for chat messages
+        chat_container = st.container()
+        
+        # Display chat history
+        with chat_container:
+            for i, message in enumerate(st.session_state.chat_history):
+                if message["role"] == "user":
+                    st.chat_message("user").write(message["content"])
+                else:
+                    with st.chat_message("assistant"):
+                        st.write(message["content"])
+                        
+                        # Show source documents with diversity information if available
+                        if "sources" in message:
+                            # Count unique documents
+                            doc_sources = set([source['source'] for source in message["sources"]])
+                            
+                            with st.expander(f"Sources (from {len(doc_sources)} documents)"):
+                                # Group sources by document
+                                sources_by_doc = {}
+                                for source in message["sources"]:
+                                    doc_name = source['source']
+                                    if doc_name not in sources_by_doc:
+                                        sources_by_doc[doc_name] = []
+                                    sources_by_doc[doc_name].append(source)
+                                
+                                # Display sources grouped by document
+                                for doc_name, doc_sources in sources_by_doc.items():
+                                    st.markdown(f"### Document: {doc_name}")
+                                    for source in doc_sources:
+                                        st.markdown(f"*Score: {source['score']:.2f}*")
+                                        st.markdown(source['content'])
+                                        st.markdown("---")
+        
+        # Process chat input
+        if user_query and st.session_state.conversation_ready:
+            # Add user message to chat history
+            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            
+            # Display user message
+            st.chat_message("user").write(user_query)
+            
+            # Get response from LLM with sources
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    try:
+                        # Get relevant documents
+                        docs = st.session_state.graph_retriever.get_relevant_documents(user_query)
+                        
+                        # Create a list of sources for display
+                        sources = []
+                        for doc in docs:
+                            sources.append({
+                                "content": doc.page_content,
+                                "source": doc.metadata.get("source", "Unknown"),
+                                "score": doc.metadata.get("score", 0.0),
+                                "entities": doc.metadata.get("entities", [])
+                            })
+                        
+                        # Create a prompt with the retrieved documents
+                        prompt = f"""
+                        As an expert assistant, provide a detailed and extensive answer to the following question using the provided context. Your response should be thorough and well-organized, following these guidelines:
+
+                        1. Begin with a comprehensive overview that sets the stage for your detailed explanation
+                        2. Structure your response with clear sections and descriptive headings
+                        3. Incorporate direct quotes and specific examples from the source documents, citing them as "Document X"
+                        4. Deep dive into key concepts, explaining their relationships and implications
+                        5. Provide extensive explanations with supporting details, avoiding brief or surface-level answers
+                        6. Create smooth transitions between topics to maintain a cohesive narrative
+                        7. Draw connections between different sources when they support or complement each other
+                        8. Include practical examples or applications where relevant
+                        9. End with a thorough conclusion that summarizes the key insights
+
+                        If information is missing from the context, clearly identify:
+                        - What specific information is needed
+                        - Why this information would enhance the answer
+                        - How it relates to the available information
+
+                        Aim to be thorough and expansive in your response, providing as much relevant detail as possible.
+
+                        Question: {user_query}
+
+                        Context:
+                        """
+                        
+                        # Add context from retrieved documents
+                        for i, doc in enumerate(docs[:5]):  # Limit to top 5 docs for better performance
+                            prompt += f"\n---\nDocument {i+1} (from {doc.metadata.get('source', 'Unknown')}):\n{doc.page_content}\n"
+                        
+                        # Get response from LLM
+                        response = st.session_state.llm.invoke(prompt)
+                        
+                        # Display response
+                        st.write(response)
+                        
+                        # Show sources with document diversity information
+                        if sources:
+                            # Count unique documents
+                            doc_sources = set([source['source'] for source in sources])
+                            
+                            with st.expander(f"Sources (from {len(doc_sources)} documents)"):
+                                # Group sources by document
+                                sources_by_doc = {}
+                                for source in sources:
+                                    doc_name = source['source']
+                                    if doc_name not in sources_by_doc:
+                                        sources_by_doc[doc_name] = []
+                                    sources_by_doc[doc_name].append(source)
+                                
+                                # Display sources grouped by document
+                                for doc_name, doc_sources in sources_by_doc.items():
+                                    st.markdown(f"### Document: {doc_name}")
+                                    for source in doc_sources:
+                                        st.markdown(f"*Score: {source['score']:.2f}*")
+                                        st.markdown(source['content'])
+                                        st.markdown("---")
+                        
+                        # Add assistant message to chat history with sources
+                        st.session_state.chat_history.append({
+                            "role": "assistant", 
+                            "content": response,
+                            "sources": sources
+                        })
+                        
+                    except Exception as e:
+                        st.error(f"Error generating response: {str(e)}")
+                        st.session_state.chat_history.append({
+                            "role": "assistant", 
+                            "content": f"I'm sorry, I encountered an error: {str(e)}"
+                        })
+    else:
+        # Show message if conversation is not ready
+        st.info("Please upload documents to start chatting.")
+
+# Knowledge Graph tab
+with tab2:
+    st.header("Knowledge Graph Visualization")
+    
+    # Add document statistics
+    if st.session_state.conversation_ready:
+        with st.session_state.neo4j_driver.session() as session:
+            # Get document count
+            doc_count_result = session.run("MATCH (d:Document) RETURN count(d) as count")
+            doc_count = doc_count_result.single()["count"]
+            
+            # Get chunk count
+            chunk_count_result = session.run("MATCH (c:Chunk) RETURN count(c) as count")
+            chunk_count = chunk_count_result.single()["count"]
+            
+            # Get entity count
+            entity_count_result = session.run("MATCH (e:Entity) RETURN count(e) as count")
+            entity_count = entity_count_result.single()["count"]
+            
+            # Display statistics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Documents", doc_count)
+            with col2:
+                st.metric("Chunks", chunk_count)
+            with col3:
+                st.metric("Entities", entity_count)
+            
+            # Display document list with chunk counts
+            st.subheader("Document Distribution")
+            doc_stats_result = session.run("""
+            MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
+            WITH d.name as name, count(c) as chunk_count
+            RETURN name, chunk_count
+            ORDER BY chunk_count DESC
+            """)
+            
+            doc_stats = [{"name": record["name"], "chunk_count": record["chunk_count"]} 
+                        for record in doc_stats_result]
+            
+            if doc_stats:
+                # Create a DataFrame for better display
+                import pandas as pd
+                df = pd.DataFrame(doc_stats)
+                df.columns = ["Document", "Chunks"]
+                
+                # Display as a bar chart
+                st.bar_chart(df.set_index("Document"))
+    
+    # Check if there are documents in the database
+    if st.session_state.conversation_ready:
+        # Visualize the graph
+        with st.spinner("Generating knowledge graph visualization..."):
+            html = visualize_neo4j_graph()
+            st.components.v1.html(html, height=600)
+    else:
+        st.info("Please upload documents to visualize the knowledge graph.")
+
+# Function to process the file queue
+def process_queue():
+    if not st.session_state.file_queue:
+        st.session_state.processing = False
+        return
+    
+    # Get the next file from the queue
+    file_info = st.session_state.file_queue[0]
+    if file_info["status"] != "processing":
+        # Update status to processing and rerun to show updated status
+        file_info["status"] = "processing"
+        st.session_state.file_queue[0] = file_info
+        st.rerun()
+        
+    file = file_info["file"]
+    file_type = file_info["type"]
+    
+    try:
+        # Process the file
+        success, message = process_document(file, file_type)
+        
+        # Update status based on result
+        if success:
+            file_info["status"] = "completed"
+            file_info["message"] = message
+        else:
+            file_info["status"] = "error"
+            file_info["message"] = message
+        
+        # Move from queue to processed
+        st.session_state.processed_files.append(file_info)
+        st.session_state.file_queue.pop(0)
+        
+        # Continue processing the queue
+        if st.session_state.file_queue:
+            st.rerun()
+        else:
+            st.session_state.processing = False
+            
+    except Exception as e:
+        file_info["status"] = "error"
+        file_info["message"] = str(e)
+        st.session_state.processed_files.append(file_info)
+        st.session_state.file_queue.pop(0)
+        
+        # Continue processing the queue
+        if st.session_state.file_queue:
+            st.rerun()
+        else:
+            st.session_state.processing = False
 
 # Function to delete a document and all its associated data from Neo4j
 def delete_document(doc_id, doc_name):
@@ -756,255 +1029,101 @@ def delete_document(doc_id, doc_name):
 with st.sidebar:
     st.header("Document Management")
     
-    # Document upload section
-    st.subheader("Add Documents")
-    uploaded_file = st.file_uploader("Choose a file", type=["txt", "pdf", "docx", "csv"])
+    # File uploader for multiple files
+    uploaded_files = st.file_uploader(
+        "Upload documents to process",
+        type=["pdf", "txt", "docx", "csv"],
+        accept_multiple_files=True,
+        help="Upload PDF, TXT, DOCX, or CSV files to process"
+    )
     
-    if uploaded_file is not None:
-        file_type = uploaded_file.name.split(".")[-1].lower()
-        if st.button("Process Document"):
-            with st.spinner("Processing document..."):
-                success, message = process_document(uploaded_file, file_type)
-                if success:
-                    st.success(message)
-                else:
-                    st.error(message)
-    
-    # Document deletion section
-    st.subheader("Manage Documents")
-    
-    # Get list of documents from Neo4j
-    @st.cache_data(ttl=5)  # Short cache to ensure list is updated after deletions
-    def get_document_list():
-        if not st.session_state.neo4j_driver:
-            return []
-        
-        try:
-            with st.session_state.neo4j_driver.session() as session:
-                result = session.run("""
-                MATCH (d:Document)
-                RETURN d.id as id, d.name as name, d.created_at as created_at
-                ORDER BY d.created_at DESC
-                """)
+    # Add files to queue when uploaded
+    if uploaded_files:
+        for file in uploaded_files:
+            # Check if file is already in queue or processed
+            file_names = [f["name"] for f in st.session_state.file_queue + st.session_state.processed_files]
+            if file.name not in file_names:
+                # Get file type from extension
+                file_type = file.name.split(".")[-1].lower()
+                if file_type not in ["pdf", "txt", "docx", "csv"]:
+                    file_type = "txt"  # Default to text
                 
-                documents = []
-                for record in result:
-                    documents.append({
-                        "id": record["id"],
-                        "name": record["name"],
-                        "created_at": record["created_at"]
-                    })
-                
-                return documents
-        except Exception as e:
-            st.error(f"Error retrieving document list: {str(e)}")
-            return []
+                # Add to queue
+                st.session_state.file_queue.append({
+                    "name": file.name,
+                    "file": file,
+                    "type": file_type,
+                    "status": "queued",
+                    "message": "Waiting to be processed"
+                })
     
-    # Display document list with delete buttons
-    documents = get_document_list()
+    # Process queue button
+    if st.session_state.file_queue:
+        if not st.session_state.processing:
+            if st.button("Process Queue", type="primary"):
+                st.session_state.processing = True
+                process_queue()
+        elif st.session_state.processing:
+            # Add a spinner while processing
+            with st.spinner(f"Processing {st.session_state.file_queue[0]['name']}..."):
+                process_queue()
     
-    if not documents:
-        st.info("No documents found in the database")
-    else:
-        for doc in documents:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(f"📄 {doc['name']}")
-            with col2:
-                # Create a unique key for each delete button
-                delete_key = f"delete_{doc['id']}"
-                if st.button("🗑️ Delete", key=delete_key):
-                    with st.spinner(f"Deleting {doc['name']}..."):
-                        success, message = delete_document(doc['id'], doc['name'])
-                        if success:
-                            st.success(message)
-                            # Clear the document list cache to refresh the list
-                            get_document_list.clear()
-                            # Force a rerun to update the UI
-                            st.rerun()
-                        else:
-                            st.error(message)
-    
-    # Only show statistics when expanded
-    if st.sidebar.checkbox("Show Statistics", value=False):
-        st.divider()
-        st.header("Graph Statistics")
+    # Show queue status
+    if st.session_state.file_queue or st.session_state.processed_files:
+        st.subheader("File Queue")
         
-        # Calculate statistics from Neo4j with longer cache
-        @st.cache_data(ttl=30)  # Cache for 30 seconds
-        def get_neo4j_stats():
-            if not st.session_state.neo4j_driver:
-                return {
-                    "documents": 0,
-                    "chunks": 0,
-                    "entities": 0,
-                    "connections": 0
-                }
+        # Show files in queue
+        for i, file_info in enumerate(st.session_state.file_queue):
+            status_color = "blue"
+            if file_info["status"] == "processing":
+                status_color = "orange"
             
-            try:
-                with st.session_state.neo4j_driver.session() as session:
-                    # Use a single query for better performance
-                    query = """
-                    MATCH (d:Document) WITH count(d) AS doc_count
-                    MATCH (c:Chunk) WITH doc_count, count(c) AS chunk_count
-                    MATCH (e:Entity) WITH doc_count, chunk_count, count(e) AS entity_count
-                    MATCH ()-[r]->() WITH doc_count, chunk_count, entity_count, count(r) AS rel_count
-                    RETURN doc_count, chunk_count, entity_count, rel_count
-                    """
-                    
-                    result = session.run(query)
-                    record = result.single()
-                    
-                    return {
-                        "documents": record["doc_count"],
-                        "chunks": record["chunk_count"],
-                        "entities": record["entity_count"],
-                        "connections": record["rel_count"]
-                    }
-            except Exception as e:
-                return {
-                    "documents": 0,
-                    "chunks": 0,
-                    "entities": 0,
-                    "connections": 0
-                }
+            st.markdown(f"""
+            <div style="padding: 5px; margin-bottom: 5px; border-left: 3px solid {status_color};">
+                <strong>{file_info["name"]}</strong><br/>
+                <small>Status: {file_info["status"]}</small>
+            </div>
+            """, unsafe_allow_html=True)
         
-        # Get cached statistics
-        stats = get_neo4j_stats()
-        
-        # Display statistics with a more efficient layout
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Documents", stats["documents"])
-            st.metric("Chunks", stats["chunks"])
-        with col2:
-            st.metric("Entities", stats["entities"])
-            st.metric("Connections", stats["connections"])
-
-# Chat input - must be outside of tabs
-chat_input_placeholder = st.empty()
-
-# Simplified tabs - only show graph visualization on demand
-tab_options = ["Chat", "Knowledge Graph (Heavy)"]
-selected_tab = st.radio("Select View", tab_options, horizontal=True, index=0)
-
-# Chat tab - optimized for performance
-if selected_tab == "Chat":
-    # Display chat messages directly without caching
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-# Knowledge Graph tab - with loading indicator and lazy loading
-elif selected_tab == "Knowledge Graph (Heavy)":
-    st.warning("⚠️ Graph visualization is resource-intensive and may slow down the application")
-    
-    if st.button("Load Knowledge Graph"):
-        # Check if Neo4j is connected and has data
-        if st.session_state.neo4j_driver:
-            with st.spinner("Rendering knowledge graph from Neo4j..."):
-                html = visualize_neo4j_graph()
-                if isinstance(html, str) and html.startswith("No graph data") or html.startswith("Neo4j database"):
-                    st.info(html)
-                else:
-                    st.components.v1.html(html, height=600)
-        else:
-            st.info("Neo4j database is not connected. Please check your connection.")
-
-# Initialize chat history if not already in session state
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-# Chat input - placed outside of tabs with simplified approach
-with chat_input_placeholder:
-    # Get user input
-    prompt = st.chat_input("Ask a question about your documents")
-    
-    # Process user input if provided
-    if prompt:
-        # Add user message to chat history
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        
-        # Display user message
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # Generate and display assistant response
-        with st.chat_message("assistant"):
-            message_placeholder = st.empty()
+        # Show processed files
+        for i, file_info in enumerate(st.session_state.processed_files):
+            status_color = "green" if file_info["status"] == "completed" else "red"
             
-            if not st.session_state.get("conversation_ready", False):
-                response = "Please add documents first before asking questions."
-            else:
-                with st.spinner("Thinking..."):
-                    try:
-                        # Create a progress bar for response generation
-                        progress_bar = st.progress(0)
-                        
-                        # Step 1: Retrieve relevant documents using GraphRAG
-                        progress_bar.progress(20, text="Retrieving relevant documents using GraphRAG...")
-                        message_placeholder.markdown("Retrieving relevant documents using GraphRAG...")
-                        docs = st.session_state.graph_retriever.get_relevant_documents(prompt)
-                        
-                        # Step 2: Format context from retrieved documents
-                        progress_bar.progress(40, text="Processing documents...")
-                        context = "\n\n".join([doc.page_content for doc in docs])
-                        
-                        # Step 3: Create prompt with context
-                        progress_bar.progress(60, text="Generating response...")
-                        message_placeholder.markdown("Generating response...")
-                        prompt_with_context = f"""
-                        Answer the question based on the following context:
-                        
-                        {context}
-                        
-                        Question: {prompt}
-                        
-                        Answer:
-                        """
-                        
-                        # Step 4: Generate response with LLM
-                        progress_bar.progress(80, text="Finalizing response...")
-                        response = st.session_state.llm.invoke(prompt_with_context)
-                        
-                        # Step 5: Add source citation - using the most reliable approach
-                        # Find the document source with the highest total relevance score
-                        
-                        # Group documents by source and calculate total relevance
-                        source_scores = {}
-                        for doc in docs:
-                            source = doc.metadata.get("source", "Unknown")
-                            score = float(doc.metadata.get("score", 0))
-                            
-                            if source not in source_scores:
-                                source_scores[source] = score
+            st.markdown(f"""
+            <div style="padding: 5px; margin-bottom: 5px; border-left: 3px solid {status_color};">
+                <strong>{file_info["name"]}</strong><br/>
+                <small>Status: {file_info["status"]}</small>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    # Show documents in database
+    st.subheader("Documents in Database")
+    
+    if st.session_state.neo4j_driver:
+        with st.session_state.neo4j_driver.session() as session:
+            result = session.run("""
+            MATCH (d:Document)
+            RETURN d.id as id, d.name as name, d.created_at as created_at
+            ORDER BY d.created_at DESC
+            """)
+            
+            docs = [{"id": record["id"], "name": record["name"], "created_at": record["created_at"]} 
+                   for record in result]
+            
+            if docs:
+                for doc in docs:
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(f"**{doc['name']}**")
+                    with col2:
+                        if st.button("Delete", key=f"del_{doc['id']}", type="secondary"):
+                            success, message = delete_document(doc['id'], doc['name'])
+                            if success:
+                                st.success(message)
+                                st.rerun()
                             else:
-                                source_scores[source] += score
-                        
-                        # Find the source with the highest total score
-                        if source_scores:
-                            best_source = max(source_scores.items(), key=lambda x: x[1])[0]
-                            citation = f"\n\n**Source:** {best_source}"
-                            response += citation
-                        
-                        # Complete progress
-                        progress_bar.progress(100, text="Complete!")
-                        
-                        # Clear progress bar
-                        progress_bar.empty()
-                            
-                    except Exception as e:
-                        response = f"Error generating response: {str(e)}"
-            
-            # Display the final response
-            message_placeholder.markdown(response)
-            
-            # Add assistant response to chat history
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
-            
-            # Force a rerun to update the UI with the new chat history
-            st.rerun()
-
-if __name__ == "__main__":
-    # This will be used when running the app directly
-    pass
+                                st.error(message)
+            else:
+                st.info("No documents in database. Upload documents to get started.")
+    else:
+        st.error("Neo4j database is not connected. Please check your connection.")
