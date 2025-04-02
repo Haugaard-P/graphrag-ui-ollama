@@ -132,26 +132,47 @@ class GraphRAGRetriever:
         # Convert embedding to string for Cypher query
         query_embedding_str = str(query_embedding_list)
         
-        # Use a simpler approach for similarity calculation
-        # This query doesn't require the GDS library
+        # Extract keywords from the query for text-based matching
+        import re
+        # Remove common stop words and extract meaningful keywords
+        stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 
+                     'in', 'on', 'at', 'to', 'for', 'with', 'by', 'about', 'of'}
+        query_keywords = [word.lower() for word in re.findall(r'\b\w+\b', query) 
+                         if word.lower() not in stop_words and len(word) > 2]
+        
+        # Create a Cypher query that searches for chunks containing query keywords
+        # and ensures document diversity in results
         cypher_query = """
         MATCH (c:Chunk)
         WHERE c.embedding IS NOT NULL
         MATCH (d:Document)-[:CONTAINS]->(c)
         OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity)
-        WITH c, d, collect(DISTINCT e.name) AS entities
+        WITH c, d, collect(DISTINCT e.name) AS entities,
+             CASE
+               WHEN any(keyword IN $keywords WHERE toLower(c.content) CONTAINS toLower(keyword)) THEN 2.0
+               ELSE 1.0
+             END AS relevance_score
+        // First, get top chunks per document to ensure document diversity
+        WITH d, c, entities, relevance_score
+        ORDER BY d.id, relevance_score DESC
+        WITH d, collect({chunk: c, score: relevance_score, entities: entities})[0..5] AS top_chunks_per_doc
+        UNWIND top_chunks_per_doc AS chunk_data
+        WITH chunk_data.chunk AS c, d, chunk_data.entities AS entities, chunk_data.score AS relevance_score
         RETURN 
             c.content AS content, 
             c.id AS id, 
             d.name AS source, 
-            1.0 AS score,  // Default score since we can't calculate cosine similarity
+            relevance_score AS score,
             entities
-        LIMIT 5
+        ORDER BY relevance_score DESC
+        LIMIT 15
         """
         
         try:
             with self.driver.session() as session:
-                result = session.run(cypher_query, query_embedding=query_embedding_str)
+                result = session.run(cypher_query, 
+                                    query_embedding=query_embedding_str,
+                                    keywords=query_keywords)
                 
                 # Convert to Documents with enhanced metadata
                 documents = []
@@ -464,7 +485,7 @@ def add_to_neo4j_graph(chunks, filename, embeddings_model):
         tx.create(rel)
     
     # Commit all changes in a single transaction
-    tx.commit()
+    graph.commit(tx)
 
 # Function to visualize the graph from Neo4j - highly optimized for performance
 @st.cache_data(ttl=600)  # Cache for 10 minutes for better performance
@@ -494,8 +515,8 @@ def visualize_neo4j_graph():
         overlap=0.5  # Allow more overlap for faster rendering
     )
     
-    # Limit the number of nodes for better performance
-    max_nodes = 100  # Limit total nodes
+    # Increase node limit to match chunk limit
+    max_nodes = 1000  # Match the total chunk limit
     
     # Query Neo4j for nodes and relationships - optimized query with limits
     with st.session_state.neo4j_driver.session() as session:
@@ -518,15 +539,31 @@ def visualize_neo4j_graph():
                             size=25)
                 doc_nodes.add(record["doc_id"])
         
-        # Get a limited number of chunks and entities
-        chunk_query = """
+        # First, count the total number of documents to distribute chunks evenly
+        count_query = """
+        MATCH (d:Document)
+        RETURN count(d) AS doc_count
+        """
+        count_result = session.run(count_query)
+        doc_count = count_result.single()["doc_count"]
+        
+        # Calculate chunks per document (with a minimum of 10)
+        total_limit = 1000
+        chunks_per_doc = max(10, total_limit // doc_count if doc_count > 0 else 10)
+        
+        # Get chunks for each document - ensure all documents have representation
+        chunk_query = f"""
         MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
+        WITH d, c, c.preview AS preview, c.index AS index
+        ORDER BY d.id, index
+        WITH d, collect({{chunk_id: c.id, preview: preview, index: index}})[0..{chunks_per_doc}] AS doc_chunks
+        UNWIND doc_chunks AS chunk_data
         RETURN 
             d.id AS doc_id,
-            c.id AS chunk_id, 
-            c.preview AS chunk_preview, 
-            c.index AS chunk_index
-        LIMIT 50
+            chunk_data.chunk_id AS chunk_id, 
+            chunk_data.preview AS chunk_preview, 
+            chunk_data.index AS chunk_index
+        LIMIT {total_limit}
         """
         
         chunk_result = session.run(chunk_query)
@@ -535,21 +572,54 @@ def visualize_neo4j_graph():
         chunk_nodes = set()
         doc_chunk_edges = set()
         
+        # First, organize chunks by document to ensure all documents have representation
+        chunks_by_doc = {}
         for record in chunk_result:
-            # Add chunk node if not already added and we haven't reached the limit
-            if record["chunk_id"] and record["chunk_id"] not in chunk_nodes and len(chunk_nodes) < max_nodes:
-                net.add_node(record["chunk_id"], 
-                            label=f"C{record['chunk_index']}",  # Shorter label
-                            title=record["chunk_preview"],
-                            color="#4ECDC4", 
-                            size=10)  # Smaller size
-                chunk_nodes.add(record["chunk_id"])
-                
-                # Add document-chunk edge
-                if record["doc_id"]:
-                    edge = (record["doc_id"], record["chunk_id"])
+            doc_id = record["doc_id"]
+            if doc_id not in chunks_by_doc:
+                chunks_by_doc[doc_id] = []
+            
+            chunks_by_doc[doc_id].append({
+                "chunk_id": record["chunk_id"],
+                "chunk_preview": record["chunk_preview"],
+                "chunk_index": record["chunk_index"]
+            })
+        
+        # Ensure each document has at least some chunks shown
+        for doc_id, chunks in chunks_by_doc.items():
+            # Add at least 5 chunks per document (or all if less than 5)
+            for i, chunk in enumerate(chunks[:min(5, len(chunks))]):
+                if chunk["chunk_id"] and chunk["chunk_id"] not in chunk_nodes:
+                    net.add_node(chunk["chunk_id"], 
+                                label=f"C{chunk['chunk_index']}",  # Shorter label
+                                title=chunk["chunk_preview"],
+                                color="#4ECDC4", 
+                                size=10)  # Smaller size
+                    chunk_nodes.add(chunk["chunk_id"])
+                    
+                    # Add document-chunk edge
+                    edge = (doc_id, chunk["chunk_id"])
                     if edge not in doc_chunk_edges:
-                        net.add_edge(record["doc_id"], record["chunk_id"], width=0.5)  # Thinner edges
+                        net.add_edge(doc_id, chunk["chunk_id"], width=0.5)  # Thinner edges
+                        doc_chunk_edges.add(edge)
+            
+            # Add remaining chunks if we haven't reached the limit
+            for chunk in chunks[5:]:
+                if len(chunk_nodes) >= max_nodes:
+                    break
+                    
+                if chunk["chunk_id"] and chunk["chunk_id"] not in chunk_nodes:
+                    net.add_node(chunk["chunk_id"], 
+                                label=f"C{chunk['chunk_index']}",  # Shorter label
+                                title=chunk["chunk_preview"],
+                                color="#4ECDC4", 
+                                size=10)  # Smaller size
+                    chunk_nodes.add(chunk["chunk_id"])
+                    
+                    # Add document-chunk edge
+                    edge = (doc_id, chunk["chunk_id"])
+                    if edge not in doc_chunk_edges:
+                        net.add_edge(doc_id, chunk["chunk_id"], width=0.5)  # Thinner edges
                         doc_chunk_edges.add(edge)
         
         # Get a limited number of entities
@@ -897,13 +967,25 @@ with chat_input_placeholder:
                         progress_bar.progress(80, text="Finalizing response...")
                         response = st.session_state.llm.invoke(prompt_with_context)
                         
-                        # Step 5: Add source information
-                        sources = "\n\n**Sources:**\n"
-                        for i, doc in enumerate(docs[:3]):  # Limit to top 3 sources
-                            source = doc.metadata.get("source", f"Document {i+1}")
-                            sources += f"- {source}\n"
+                        # Step 5: Add source citation - using the most reliable approach
+                        # Find the document source with the highest total relevance score
                         
-                        response += sources
+                        # Group documents by source and calculate total relevance
+                        source_scores = {}
+                        for doc in docs:
+                            source = doc.metadata.get("source", "Unknown")
+                            score = float(doc.metadata.get("score", 0))
+                            
+                            if source not in source_scores:
+                                source_scores[source] = score
+                            else:
+                                source_scores[source] += score
+                        
+                        # Find the source with the highest total score
+                        if source_scores:
+                            best_source = max(source_scores.items(), key=lambda x: x[1])[0]
+                            citation = f"\n\n**Source:** {best_source}"
+                            response += citation
                         
                         # Complete progress
                         progress_bar.progress(100, text="Complete!")
