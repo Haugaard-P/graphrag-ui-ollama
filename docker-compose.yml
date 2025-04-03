@@ -18,7 +18,7 @@ services:
       # Streamlit performance optimizations
       - STREAMLIT_SERVER_MAX_UPLOAD_SIZE=200
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-      - STREAMLIT_THEME_BASE=light
+      - STREAMLIT_THEME_BASE=auto
       - STREAMLIT_LOGGER_LEVEL=error
       - PYTHONUNBUFFERED=1
     depends_on:

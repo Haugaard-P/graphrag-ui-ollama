@@ -20,20 +20,68 @@ from neo4j import GraphDatabase
 from py2neo import Graph, Node, Relationship
 
 # Set page configuration with minimal UI for better performance
+# Load Streamlit config
+import toml
+
+# Set config.toml with custom theme settings
+config = {
+    "theme": {
+        "base": "dark",  # Use system theme
+        "primaryColor": "#FF4B4B",
+        "backgroundColor": "auto",
+        "secondaryBackgroundColor": "auto",
+        "textColor": "auto",
+        "font": "sans serif"
+    }
+}
+
+# Save config to .streamlit/config.toml
+import os
+os.makedirs(".streamlit", exist_ok=True)
+with open(".streamlit/config.toml", "w") as f:
+    toml.dump(config, f)
+
 st.set_page_config(
     page_title="FREAKSHOW Industries DocChat", 
     page_icon="fsi.jpg", 
     layout="wide",
-    initial_sidebar_state="collapsed"  # Start with sidebar collapsed for faster loading
+    initial_sidebar_state="collapsed",  # Start with sidebar collapsed for faster loading
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': """
+        # FREAKSHOW Industries Document Chat
+        
+        A document chat interface powered by GraphRAG and Ollama.
+        
+        [View on GitHub](https://github.com/Haugaard-P/graphrag-ui-ollama)
+        """
+    }
 )
 
 # Disable Streamlit's automatic scrolling for better performance
 st.markdown("""
 <style>
+    /* Theme-aware styling */
+    :root[data-theme="dark"] {
+        --text-color: #ffffff;
+        --background-color: #0e1117;
+        --link-color: #4d9fff;
+        --border-color: #333333;
+    }
+    
+    :root[data-theme="light"] {
+        --text-color: #0e1117;
+        --background-color: #ffffff;
+        --link-color: #0068c9;
+        --border-color: #dddddd;
+    }
+
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
     }
+
     /* Logo styling */
     .stApp > header {
         background-color: transparent !important;
@@ -43,17 +91,56 @@ st.markdown("""
         margin-top: -50px;
         margin-bottom: -50px;
     }
+
+    /* Theme-aware components */
     .stTabs [data-baseweb="tab-panel"] {
         padding-top: 0.5rem;
+        background-color: var(--background-color);
+        color: var(--text-color);
     }
+    
     .stMarkdown p {
         margin-bottom: 0.5rem;
+        color: var(--text-color);
     }
+    
     .stChatMessage {
         padding: 0.5rem;
+        background-color: var(--background-color);
+        border: 1px solid var(--border-color);
     }
+    
     .stChatMessage [data-testid="stMarkdownContainer"] p {
         margin-bottom: 0.3rem;
+        color: var(--text-color);
+    }
+
+    /* Theme-aware chat interface */
+    .stChatMessage.user {
+        background-color: var(--background-color);
+    }
+
+    .stChatMessage.assistant {
+        background-color: color-mix(in srgb, var(--background-color) 95%, var(--text-color) 5%);
+    }
+
+    /* Theme-aware buttons and inputs */
+    .stButton button {
+        background-color: var(--background-color);
+        color: var(--text-color);
+        border: 1px solid var(--border-color);
+    }
+
+    .stTextInput input {
+        background-color: var(--background-color);
+        color: var(--text-color);
+        border: 1px solid var(--border-color);
+    }
+
+    .stSelectbox select {
+        background-color: var(--background-color);
+        color: var(--text-color);
+        border: 1px solid var(--border-color);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -74,22 +161,28 @@ def get_neo4j_driver():
     for method in connection_methods:
         try:
             uri = method["uri"]
-            st.info(f"Trying to connect to Neo4j at {uri}...")
+            # Use write with small text for less intrusive messages
+            with st.sidebar:
+                st.write(f"<small>Connecting to Neo4j at {uri}...</small>", unsafe_allow_html=True)
             driver = GraphDatabase.driver(uri, auth=(user, password))
             
             # Test connection
             with driver.session() as session:
                 result = session.run("MATCH (n) RETURN count(n) as count")
                 count = result.single()["count"]
-                st.success(f"Connected to Neo4j database at {uri} with {count} nodes")
+                # Move success message to sidebar with minimal visibility
+                with st.sidebar:
+                    st.write(f"<small>✓ Neo4j connected ({count} nodes)</small>", unsafe_allow_html=True)
             
             # Store the successful URI for py2neo to use
             os.environ["SUCCESSFUL_NEO4J_URI"] = uri
             return driver
         except Exception as e:
-            st.warning(f"Failed to connect to Neo4j at {uri}: {str(e)}")
+            with st.sidebar:
+                st.write(f"<small>⚠️ Unable to connect to {uri}</small>", unsafe_allow_html=True)
     
-    st.error("All Neo4j connection attempts failed")
+    with st.sidebar:
+        st.write("<small>⚠️ Neo4j connection failed</small>", unsafe_allow_html=True)
     return None
 
 # Function to get py2neo Graph object
@@ -101,12 +194,16 @@ def get_py2neo_graph():
     password = os.environ.get("NEO4J_PASSWORD", "graphragpassword")
     
     try:
-        st.info(f"Connecting to Neo4j with py2neo at {uri}...")
+        # Move connection messages to sidebar with minimal visibility
+        with st.sidebar:
+            st.write("<small>Initializing graph connection...</small>", unsafe_allow_html=True)
         graph = Graph(uri, auth=(user, password))
-        st.success(f"Connected to Neo4j with py2neo at {uri}")
+        with st.sidebar:
+            st.write("<small>✓ Graph connection ready</small>", unsafe_allow_html=True)
         return graph
     except Exception as e:
-        st.error(f"Error connecting to Neo4j with py2neo: {str(e)}")
+        with st.sidebar:
+            st.write(f"<small>⚠️ Graph connection error: {str(e)}</small>", unsafe_allow_html=True)
         return None
 
 # Custom GraphRAG retriever class using Neo4j - optimized for performance
@@ -217,7 +314,8 @@ class GraphRAGRetriever:
                 self.cache[query] = documents
                 return documents
         except Exception as e:
-            st.error(f"Error retrieving documents from Neo4j: {str(e)}")
+            with st.sidebar:
+                st.write(f"<small>⚠️ Error retrieving documents: {str(e)}</small>", unsafe_allow_html=True)
             return []
 
 # Function to initialize Neo4j database with constraints and indexes
@@ -237,10 +335,12 @@ def initialize_neo4j_database(driver):
             # We'll use a simpler approach for retrieval
             pass
                 
-        st.success("Neo4j database initialized with constraints and indexes")
+        with st.sidebar:
+            st.write("<small>✓ Neo4j database initialized</small>", unsafe_allow_html=True)
         return True
     except Exception as e:
-        st.error(f"Error initializing Neo4j database: {str(e)}")
+        with st.sidebar:
+            st.write(f"<small>⚠️ Database initialization error: {str(e)}</small>", unsafe_allow_html=True)
         return False
 
 # Configure LLM and embeddings
@@ -258,7 +358,8 @@ def get_llm():
             repeat_penalty=1.1  # Reduce repetition
         )
     except Exception as e:
-        st.error(f"Error initializing LLM: {str(e)}")
+        with st.sidebar:
+            st.write(f"<small>⚠️ LLM initialization error: {str(e)}</small>", unsafe_allow_html=True)
         return None
 
 @st.cache_resource
@@ -267,7 +368,8 @@ def get_embeddings():
         from langchain_community.embeddings.ollama import OllamaEmbeddings
         return OllamaEmbeddings(base_url="http://192.168.6.150:11434", model="llama3.1")
     except Exception as e:
-        st.error(f"Error initializing embeddings: {str(e)}")
+        with st.sidebar:
+            st.write(f"<small>⚠️ Embeddings initialization error: {str(e)}</small>", unsafe_allow_html=True)
         return None
 
 # Initialize session state variables
@@ -760,7 +862,7 @@ col1, col2 = st.columns([1, 5])
 with col1:
     st.image("fsi.jpg", width=100)
 with col2:
-    st.title("GraphRAG")
+    st.title("FREAKSHOW Industries DocChat")
 
 # Group selector and chat input at the top level
 def get_available_groups():
@@ -858,7 +960,8 @@ with tab1:
             
             current_chat_history = st.session_state.chat_histories[st.session_state.current_group]
             if not current_chat_history:
-                st.info(f"No chat history for group: {st.session_state.current_group}")
+                with st.sidebar:
+                    st.write(f"<small>ℹ️ No chat history for group: {st.session_state.current_group}</small>", unsafe_allow_html=True)
             else:
                 for i, message in enumerate(current_chat_history):
                     if message["role"] == "user":
@@ -983,14 +1086,17 @@ with tab1:
                         })
                         
                     except Exception as e:
-                        st.error(f"Error generating response: {str(e)}")
+                        error_msg = f"Error: {str(e)}"
+                        with st.sidebar:
+                            st.write(f"<small>⚠️ {error_msg}</small>", unsafe_allow_html=True)
                         st.session_state.chat_histories[st.session_state.current_group].append({
                             "role": "assistant", 
-                            "content": f"I'm sorry, I encountered an error: {str(e)}"
+                            "content": "I apologize, but I encountered an error while processing your request. Please try again."
                         })
     else:
         # Show message if conversation is not ready
-        st.info("Please upload documents to start chatting.")
+                with st.sidebar:
+                    st.write("<small>ℹ️ Please upload documents to start chatting</small>", unsafe_allow_html=True)
 
 # Knowledge Graph tab
 with tab2:
@@ -1086,7 +1192,8 @@ with tab2:
             html = visualize_neo4j_graph()
             st.components.v1.html(html, height=600)
     else:
-        st.info("Please upload documents to visualize the knowledge graph.")
+        with st.sidebar:
+            st.write("<small>ℹ️ Please upload documents to visualize the knowledge graph</small>", unsafe_allow_html=True)
 
 # Function to process the file queue
 def process_queue():
@@ -1197,7 +1304,8 @@ with st.sidebar:
     st.header("Document Management")
     
     if not st.session_state.neo4j_driver:
-        st.error("Neo4j database is not connected. Please check your connection.")
+        with st.sidebar:
+            st.write("<small>⚠️ Neo4j database is not connected. Please check your connection</small>", unsafe_allow_html=True)
     else:
         # Group management
         st.subheader("Document Groups")
@@ -1334,19 +1442,21 @@ with st.sidebar:
                 
                 st.subheader("Documents in Database")
                 if not docs_by_group:
-                    st.info("No documents in database. Upload documents to get started.")
+                    with st.sidebar:
+                        st.write("<small>ℹ️ No documents in database. Upload documents to get started</small>", unsafe_allow_html=True)
                 for group in sorted(docs_by_group.keys()):
                     st.subheader(group)
                     for doc in docs_by_group[group]:
-                        col1, col2 = st.columns([6, 1])
+                        col1, col2 = st.columns([30, 1])
                         with col1:
                             st.markdown(f"📄 **{doc['name']}**")
                         with col2:
-                            if st.button("🗑️", key=f"del_{doc['id']}", help=f"Delete {doc['name']}"):
+                            if st.button("⨯", key=f"del_{doc['id']}", help=f"Delete {doc['name']}", type="secondary"):
                                 success, msg = delete_document(doc['id'], doc['name'])
                                 if success:
-                                    st.success(msg)
+                                    with st.sidebar:
+                                        st.write(f"<small>✓ {msg}</small>", unsafe_allow_html=True)
                                     st.experimental_rerun()
                                 else:
-                                    st.error(msg)
-                        st.markdown("---")
+                                    with st.sidebar:
+                                        st.write(f"<small>⚠️ {msg}</small>", unsafe_allow_html=True)
