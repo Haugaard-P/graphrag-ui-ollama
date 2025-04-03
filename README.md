@@ -28,78 +28,89 @@ The application consists of the following components:
 ## Prerequisites
 
 - Docker and Docker Compose
-- Access to a local Ollama instance running on http://<ollama ip>:11434 (or modify the configuration to use your own Ollama instance)
+- Access to a local Ollama instance
 
 ## Quick Start
 
 1. Clone this repository
 2. Make sure your Ollama instance is running
-3. Start the application with Docker Compose:
+3. Create and configure your environment file:
+   ```bash
+   cp .env-example .env
+   ```
+   Then edit the `.env` file to set your Ollama URL and model:
+   ```env
+   OLLAMA_BASE_URL=http://your-ollama-ip:11434  # Replace with your Ollama IP
+   MODEL=llama3.1                               # Specify your preferred model
+   NEO4J_URI=bolt://neo4j:7687
+   NEO4J_USER=neo4j
+   NEO4J_PASSWORD=graphragpassword
+   ```
+4. Start the application with Docker Compose:
 
 ```bash
 docker-compose up -d
 ```
 
-4. Access the web interface at http://localhost:8501
-5. Upload documents using the file uploader in the sidebar
-6. Process documents to add them to the knowledge graph
-7. View the knowledge graph in the "Knowledge Graph" tab
-8. Ask questions about your documents in the chat interface
+5. Access the web interface at http://localhost:8501
+6. Upload documents using the file uploader in the sidebar
+7. Process documents to add them to the knowledge graph
+8. View the knowledge graph in the "Knowledge Graph" tab
+9. Ask questions about your documents in the chat interface
 
 ## Configuration
-
-You can customize the application by modifying the following files:
-
-- **docker-compose.yml**: Configure Docker services, ports, and environment variables
-- **app.py**: Modify the application logic, UI, or retrieval mechanisms
-- **.env**: Set environment variables (create this file if needed)
 
 ### Environment Variables
 
 1. Create a `.env` file in the root directory:
-```bash
-cp .env-example .env
-```
+   ```bash
+   cp .env-example .env
+   ```
 
-2. Configure the following variables in your `.env` file:
+2. Configure the following variables:
 
-```env
-# Ollama Configuration
-OLLAMA_BASE_URL=http://your-ollama-ip:11434  # Replace with your Ollama instance URL
-MODEL=llama3.1                                # Specify the model you want to use
+   ```env
+   # Ollama Configuration
+   OLLAMA_BASE_URL=http://your-ollama-ip:11434  # URL of your Ollama instance
+   MODEL=llama3.1                               # Model to use (must be installed in Ollama)
 
-# Neo4j Configuration
-NEO4J_URI=bolt://neo4j:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=graphragpassword
-```
+   # Neo4j Configuration
+   NEO4J_URI=bolt://neo4j:7687
+   NEO4J_USER=neo4j
+   NEO4J_PASSWORD=graphragpassword
+   ```
 
-#### Ollama Configuration Details:
-- `OLLAMA_BASE_URL`: The URL where your Ollama instance is running
-  - For local installations: `http://localhost:11434`
-  - For remote instances: `http://<ollama-ip>:11434`
-  - For Docker networks: Use the host machine IP if running in Docker
-- `MODEL`: The name of the Ollama model you want to use
-  - Must be a model that's already pulled in your Ollama instance
-  - Default: `llama3.1`
+   - **OLLAMA_BASE_URL**: Your Ollama instance URL
+     - Local: `http://localhost:11434`
+     - Remote: `http://<ollama-ip>:11434`
+     - Docker: Use host machine IP
+   
+   - **MODEL**: Ollama model name (default: `llama3.1`)
+
+### Configuration Files
+
+You can further customize the application by modifying:
+
+- **docker-compose.yml**: Services, ports, and environment variables
+- **app.py**: Application logic, UI, and retrieval mechanisms
 
 ## Performance Optimization
 
-The application includes several optimizations for better performance:
+The application includes several optimizations:
 
-1. **Batch Processing**: Documents are processed in batches for better efficiency
-2. **Caching**: Expensive operations are cached to reduce computation time
-3. **Optimized Queries**: Neo4j queries are optimized for faster retrieval
-4. **Resource Allocation**: Docker containers are configured with appropriate resource limits
+1. **Batch Processing**: Efficient document processing in batches
+2. **Caching**: Reduces computation time for expensive operations
+3. **Optimized Queries**: Faster retrieval with optimized Neo4j queries
+4. **Resource Allocation**: Appropriate Docker container resource limits
 
 ## Accessing Neo4j Browser
 
-You can access the Neo4j browser directly at http://localhost:7474 to explore the graph database. Use the following credentials:
+Access the Neo4j browser at http://localhost:7474 to explore the graph database:
 
-- Username: neo4j
-- Password: graphragpassword
+- Username: `neo4j`
+- Password: `graphragpassword`
 
-This will allow you to run Cypher queries and visualize the graph structure directly in the Neo4j browser.
+This interface allows you to run Cypher queries and visualize the knowledge graph structure.
 
 ## Troubleshooting
 
