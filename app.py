@@ -349,9 +349,16 @@ def get_llm():
     try:
         # Use the newer API for creating the LLM
         from langchain_community.llms.ollama import Ollama
+        # Set default model if environment variable is not set
+        model_name = os.environ.get("OLLAMA_MODEL", "llama2")
+        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        with st.sidebar:
+            st.write(f"<small>Initializing LLM with model: {model_name}</small>", unsafe_allow_html=True)
+        
         return Ollama(
-            base_url=os.environ.get("OLLAMA_BASE_URL"),
-            model=os.environ.get("MODEL"),
+            base_url=base_url,
+            model=model_name,
             temperature=0.7,  # Slightly higher temperature for more detailed responses
             num_ctx=4096,  # Larger context window for longer responses
             top_k=10,  # More diverse token selection
@@ -360,16 +367,27 @@ def get_llm():
     except Exception as e:
         with st.sidebar:
             st.write(f"<small>⚠️ LLM initialization error: {str(e)}</small>", unsafe_allow_html=True)
+            st.write("<small>Make sure OLLAMA_MODEL and OLLAMA_BASE_URL environment variables are set correctly.</small>", unsafe_allow_html=True)
+            st.write("<small>Default model: 'llama2', Default URL: 'http://localhost:11434'</small>", unsafe_allow_html=True)
         return None
 
 @st.cache_resource
 def get_embeddings():
     try:
         from langchain_community.embeddings.ollama import OllamaEmbeddings
-        return OllamaEmbeddings(base_url=os.environ.get("OLLAMA_BASE_URL"), model=os.environ.get("MODEL"))
+        # Set default model if environment variable is not set
+        model_name = os.environ.get("OLLAMA_MODEL", "llama2")
+        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        with st.sidebar:
+            st.write(f"<small>Initializing embeddings with model: {model_name}</small>", unsafe_allow_html=True)
+        
+        return OllamaEmbeddings(base_url=base_url, model=model_name)
     except Exception as e:
         with st.sidebar:
             st.write(f"<small>⚠️ Embeddings initialization error: {str(e)}</small>", unsafe_allow_html=True)
+            st.write("<small>Make sure OLLAMA_MODEL and OLLAMA_BASE_URL environment variables are set correctly.</small>", unsafe_allow_html=True)
+            st.write("<small>Default model: 'llama2', Default URL: 'http://localhost:11434'</small>", unsafe_allow_html=True)
         return None
 
 # Initialize session state variables
