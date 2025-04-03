@@ -350,8 +350,8 @@ def get_llm():
         # Use the newer API for creating the LLM
         from langchain_community.llms.ollama import Ollama
         return Ollama(
-            base_url="http://192.168.6.150:11434",
-            model="llama3.1",
+            base_url=os.environ.get("OLLAMA_BASE_URL"),
+            model=os.environ.get("MODEL"),
             temperature=0.7,  # Slightly higher temperature for more detailed responses
             num_ctx=4096,  # Larger context window for longer responses
             top_k=10,  # More diverse token selection
@@ -366,7 +366,7 @@ def get_llm():
 def get_embeddings():
     try:
         from langchain_community.embeddings.ollama import OllamaEmbeddings
-        return OllamaEmbeddings(base_url="http://192.168.6.150:11434", model="llama3.1")
+        return OllamaEmbeddings(base_url=os.environ.get("OLLAMA_BASE_URL"), model=os.environ.get("MODEL"))
     except Exception as e:
         with st.sidebar:
             st.write(f"<small>⚠️ Embeddings initialization error: {str(e)}</small>", unsafe_allow_html=True)
