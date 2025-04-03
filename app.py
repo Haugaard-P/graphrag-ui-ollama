@@ -22,7 +22,7 @@ from py2neo import Graph, Node, Relationship
 # Set page configuration with minimal UI for better performance
 st.set_page_config(
     page_title="GraphRAG", 
-    page_icon="🧠", 
+    page_icon="fsi.jpg", 
     layout="wide",
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for faster loading
 )
@@ -33,6 +33,15 @@ st.markdown("""
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
+    }
+    /* Logo styling */
+    .stApp > header {
+        background-color: transparent !important;
+    }
+    .stApp > header img {
+        width: 100px;
+        margin-top: -50px;
+        margin-bottom: -50px;
     }
     .stTabs [data-baseweb="tab-panel"] {
         padding-top: 0.5rem;
@@ -140,12 +149,10 @@ class GraphRAGRetriever:
         query_keywords = [word.lower() for word in re.findall(r'\b\w+\b', query) 
                          if word.lower() not in stop_words and len(word) > 2]
         
-        # Create a Cypher query that searches for chunks containing query keywords
-        # and ensures document diversity in results
+        # Create a Cypher query that searches for chunks only from the selected group
         cypher_query = """
-        MATCH (c:Chunk)
+        MATCH (d:Document {group: $current_group})-[:CONTAINS]->(c:Chunk)
         WHERE c.embedding IS NOT NULL
-        MATCH (d:Document)-[:CONTAINS]->(c)
         OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity)
         WITH c, d, collect(DISTINCT e.name) AS entities,
              CASE
@@ -173,10 +180,15 @@ class GraphRAGRetriever:
         """
         
         try:
+            # Ensure current group exists
+            if "current_group" not in st.session_state:
+                st.session_state.current_group = "default"
+            
             with self.driver.session() as session:
                 result = session.run(cypher_query, 
                                     query_embedding=query_embedding_str,
-                                    keywords=query_keywords)
+                                    keywords=query_keywords,
+                                    current_group=st.session_state.current_group)
                 
                 # Convert to Documents with enhanced metadata
                 documents = []
@@ -275,8 +287,18 @@ if "graph_retriever" not in st.session_state:
             neo4j_driver=st.session_state.neo4j_driver,
             embeddings_model=st.session_state.embeddings_model
         )
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+# Initialize chat-related session state variables (must happen before any UI elements)
+if "chat_histories" not in st.session_state:
+    st.session_state.chat_histories = {"default": []}
+if "current_group" not in st.session_state:
+    st.session_state.current_group = "default"
+if st.session_state.current_group not in st.session_state.chat_histories:
+    st.session_state.chat_histories[st.session_state.current_group] = []
+
+# Keep chat histories synchronized with current group
+current_group = st.session_state.current_group
+if current_group not in st.session_state.chat_histories:
+    st.session_state.chat_histories[current_group] = []
 if "conversation_ready" not in st.session_state:
     # Check if Neo4j is connected and models are loaded
     if (st.session_state.neo4j_driver and 
@@ -402,9 +424,18 @@ def add_to_neo4j_graph(chunks, filename, embeddings_model):
     all_relationships = []
     
     # Create document node
+    # Ensure current group exists
+    if "current_group" not in st.session_state:
+        st.session_state.current_group = "default"
+    
+    # Ensure chat history exists for current group
+    if "chat_histories" in st.session_state and st.session_state.current_group not in st.session_state.chat_histories:
+        st.session_state.chat_histories[st.session_state.current_group] = []
+    
     doc_node = Node("Document", 
                    id=doc_id, 
                    name=filename, 
+                   group=st.session_state.current_group,
                    created_at=pd.Timestamp.now().isoformat())
     
     # Use py2neo for batch operations
@@ -716,14 +747,101 @@ if "processing" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 
+# Initialize session state for chat and groups (must happen first, before any UI elements)
+if "chat_histories" not in st.session_state:
+    st.session_state.chat_histories = {"default": []}
+if "current_group" not in st.session_state:
+    st.session_state.current_group = "default"
+elif st.session_state.current_group not in st.session_state.chat_histories:
+    st.session_state.chat_histories[st.session_state.current_group] = []
+
 # Main UI - simplified for better performance
-st.title("📊 GraphRAG")
+col1, col2 = st.columns([1, 5])
+with col1:
+    st.image("fsi.jpg", width=100)
+with col2:
+    st.title("GraphRAG")
+
+# Group selector and chat input at the top level
+def get_available_groups():
+    groups = ["default"]
+    if st.session_state.neo4j_driver:
+        with st.session_state.neo4j_driver.session() as session:
+            result = session.run("""
+            MATCH (d:Document)
+            RETURN DISTINCT d.group as group
+            ORDER BY d.group
+            """)
+            db_groups = [record["group"] for record in result]
+            if db_groups:
+                groups = db_groups
+    return groups
+
+# Function to handle new group creation
+def handle_new_group():
+    if st.session_state.new_group_name:
+        new_group = st.session_state.new_group_name.strip()
+        if new_group:
+            st.session_state.current_group = new_group
+            st.session_state.chat_histories[new_group] = []
+            st.session_state.selected_group = new_group  # Update selectbox
+            st.experimental_rerun()  # Force UI update
+
+# Function to handle group changes
+def handle_group_change():
+    if st.session_state.selected_group == "Create new group...":
+        return  # Let the text input handle new group creation
+    st.session_state.current_group = st.session_state.selected_group
+    st.session_state.chat_histories.setdefault(st.session_state.current_group, [])
+
+# Get available groups including any pending new group
+groups = get_available_groups()
+
+# Add current group if it exists and isn't in the list
+if "current_group" in st.session_state and st.session_state.current_group not in groups:
+    groups.append(st.session_state.current_group)
+
+groups.append("Create new group...")
+
+# Initialize new group name state if not exists
+if "new_group_name" not in st.session_state:
+    st.session_state.new_group_name = ""
+
+# Group selector with change handler
+try:
+    current_index = groups.index(st.session_state.current_group)
+except ValueError:
+    current_index = 0
+    st.session_state.current_group = "default"
+
+selected_group = st.selectbox(
+    "Select document group",
+    options=groups,
+    key="selected_group",
+    index=current_index,
+    on_change=handle_group_change
+)
+
+# Show new group input if "Create new group..." is selected 
+if selected_group == "Create new group...":
+    new_group = st.text_input("Enter new group name", key="new_group_name")
+    if new_group and new_group.strip():
+        new_group = new_group.strip()
+        if new_group != "Create new group...":
+            st.session_state.current_group = new_group
+            st.session_state.chat_histories[new_group] = []
+            # Force refresh to show the new group
+            st.experimental_rerun()
+elif selected_group != st.session_state.current_group:
+    st.session_state.current_group = selected_group
+    if selected_group not in st.session_state.chat_histories:
+        st.session_state.chat_histories[selected_group] = []
+
+# Chat input must be at the root level
+user_query = st.chat_input(f"Ask a question about documents in group: {st.session_state.current_group}")
 
 # Create tabs for different views
 tab1, tab2 = st.tabs(["Chat", "Knowledge Graph"])
-
-# Chat input - must be outside of tabs
-user_query = st.chat_input("Ask a question about your documents...")
 
 # Chat tab
 with tab1:
@@ -734,12 +852,20 @@ with tab1:
         
         # Display chat history
         with chat_container:
-            for i, message in enumerate(st.session_state.chat_history):
-                if message["role"] == "user":
-                    st.chat_message("user").write(message["content"])
-                else:
-                    with st.chat_message("assistant"):
-                        st.write(message["content"])
+            # Ensure current group exists in chat histories
+            if st.session_state.current_group not in st.session_state.chat_histories:
+                st.session_state.chat_histories[st.session_state.current_group] = []
+            
+            current_chat_history = st.session_state.chat_histories[st.session_state.current_group]
+            if not current_chat_history:
+                st.info(f"No chat history for group: {st.session_state.current_group}")
+            else:
+                for i, message in enumerate(current_chat_history):
+                    if message["role"] == "user":
+                        st.chat_message("user").write(message["content"])
+                    else:
+                        with st.chat_message("assistant"):
+                            st.write(message["content"])
                         
                         # Show source documents with diversity information if available
                         if "sources" in message:
@@ -765,8 +891,11 @@ with tab1:
         
         # Process chat input
         if user_query and st.session_state.conversation_ready:
-            # Add user message to chat history
-            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            # Add user message to current group's chat history
+            st.session_state.chat_histories[st.session_state.current_group].append({
+                "role": "user", 
+                "content": user_query
+            })
             
             # Display user message
             st.chat_message("user").write(user_query)
@@ -846,8 +975,8 @@ with tab1:
                                         st.markdown(source['content'])
                                         st.markdown("---")
                         
-                        # Add assistant message to chat history with sources
-                        st.session_state.chat_history.append({
+                        # Add assistant message to current group's chat history with sources
+                        st.session_state.chat_histories[st.session_state.current_group].append({
                             "role": "assistant", 
                             "content": response,
                             "sources": sources
@@ -855,7 +984,7 @@ with tab1:
                         
                     except Exception as e:
                         st.error(f"Error generating response: {str(e)}")
-                        st.session_state.chat_history.append({
+                        st.session_state.chat_histories[st.session_state.current_group].append({
                             "role": "assistant", 
                             "content": f"I'm sorry, I encountered an error: {str(e)}"
                         })
@@ -870,47 +999,85 @@ with tab2:
     # Add document statistics
     if st.session_state.conversation_ready:
         with st.session_state.neo4j_driver.session() as session:
-            # Get document count
-            doc_count_result = session.run("MATCH (d:Document) RETURN count(d) as count")
-            doc_count = doc_count_result.single()["count"]
-            
-            # Get chunk count
-            chunk_count_result = session.run("MATCH (c:Chunk) RETURN count(c) as count")
-            chunk_count = chunk_count_result.single()["count"]
-            
-            # Get entity count
-            entity_count_result = session.run("MATCH (e:Entity) RETURN count(e) as count")
-            entity_count = entity_count_result.single()["count"]
-            
-            # Display statistics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Documents", doc_count)
-            with col2:
-                st.metric("Chunks", chunk_count)
-            with col3:
-                st.metric("Entities", entity_count)
-            
-            # Display document list with chunk counts
-            st.subheader("Document Distribution")
-            doc_stats_result = session.run("""
-            MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
-            WITH d.name as name, count(c) as chunk_count
-            RETURN name, chunk_count
-            ORDER BY chunk_count DESC
+            # Get counts by group
+            result = session.run("""
+            MATCH (d:Document)-[:CONTAINS]->(c:Chunk)-[:MENTIONS]->(e:Entity)
+            WITH d.group as group, 
+                 count(DISTINCT d) as doc_count,
+                 count(DISTINCT c) as chunk_count,
+                 count(DISTINCT e) as entity_count
+            RETURN group, doc_count, chunk_count, entity_count
+            ORDER BY group
             """)
             
-            doc_stats = [{"name": record["name"], "chunk_count": record["chunk_count"]} 
-                        for record in doc_stats_result]
+            stats = []
+            total_docs = 0
+            total_chunks = 0
+            total_entities = 0
+            
+            for record in result:
+                group = record["group"] or "default"
+                stats.append({
+                    "group": group,
+                    "docs": record["doc_count"],
+                    "chunks": record["chunk_count"],
+                    "entities": record["entity_count"]
+                })
+                total_docs += record["doc_count"]
+                total_chunks += record["chunk_count"]
+                total_entities += record["entity_count"]
+            
+            # Display total statistics
+            st.subheader("Total Statistics")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Documents", total_docs)
+            with col2:
+                st.metric("Total Chunks", total_chunks)
+            with col3:
+                st.metric("Total Entities", total_entities)
+            
+            # Display statistics by group
+            if stats:
+                st.subheader("Statistics by Group")
+                # Create DataFrame for better display
+                df_stats = pd.DataFrame(stats)
+                df_stats.set_index("group", inplace=True)
+                
+                # Display as a table
+                st.dataframe(df_stats)
+            
+            # Display document distribution by group
+            st.subheader("Document Distribution by Group")
+            doc_stats_result = session.run("""
+            MATCH (d:Document)-[:CONTAINS]->(c:Chunk)
+            WITH d.group as group, d.name as name, count(c) as chunk_count
+            RETURN group, name, chunk_count
+            ORDER BY group, chunk_count DESC
+            """)
+            
+            doc_stats = []
+            for record in doc_stats_result:
+                doc_stats.append({
+                    "Group": record["group"] or "default",
+                    "Document": record["name"],
+                    "Chunks": record["chunk_count"]
+                })
             
             if doc_stats:
-                # Create a DataFrame for better display
-                import pandas as pd
+                # Create DataFrame for better display
                 df = pd.DataFrame(doc_stats)
-                df.columns = ["Document", "Chunks"]
                 
-                # Display as a bar chart
-                st.bar_chart(df.set_index("Document"))
+                # Create grouped bar chart
+                df_pivot = df.pivot(index='Document', columns='Group', values='Chunks')
+                df_pivot.fillna(0, inplace=True)
+                
+                # Display as a stacked bar chart
+                st.bar_chart(df_pivot)
+                
+                # Also show detailed table
+                with st.expander("Show detailed distribution"):
+                    st.dataframe(df.set_index(["Group", "Document"]))
     
     # Check if there are documents in the database
     if st.session_state.conversation_ready:
@@ -1029,101 +1196,154 @@ def delete_document(doc_id, doc_name):
 with st.sidebar:
     st.header("Document Management")
     
-    # File uploader for multiple files
-    uploaded_files = st.file_uploader(
-        "Upload documents to process",
-        type=["pdf", "txt", "docx", "csv"],
-        accept_multiple_files=True,
-        help="Upload PDF, TXT, DOCX, or CSV files to process"
-    )
-    
-    # Add files to queue when uploaded
-    if uploaded_files:
-        for file in uploaded_files:
-            # Check if file is already in queue or processed
-            file_names = [f["name"] for f in st.session_state.file_queue + st.session_state.processed_files]
-            if file.name not in file_names:
-                # Get file type from extension
-                file_type = file.name.split(".")[-1].lower()
-                if file_type not in ["pdf", "txt", "docx", "csv"]:
-                    file_type = "txt"  # Default to text
-                
-                # Add to queue
-                st.session_state.file_queue.append({
-                    "name": file.name,
-                    "file": file,
-                    "type": file_type,
-                    "status": "queued",
-                    "message": "Waiting to be processed"
-                })
-    
-    # Process queue button
-    if st.session_state.file_queue:
-        if not st.session_state.processing:
-            if st.button("Process Queue", type="primary"):
-                st.session_state.processing = True
-                process_queue()
-        elif st.session_state.processing:
-            # Add a spinner while processing
-            with st.spinner(f"Processing {st.session_state.file_queue[0]['name']}..."):
-                process_queue()
-    
-    # Show queue status
-    if st.session_state.file_queue or st.session_state.processed_files:
-        st.subheader("File Queue")
+    if not st.session_state.neo4j_driver:
+        st.error("Neo4j database is not connected. Please check your connection.")
+    else:
+        # Group management
+        st.subheader("Document Groups")
         
-        # Show files in queue
-        for i, file_info in enumerate(st.session_state.file_queue):
-            status_color = "blue"
-            if file_info["status"] == "processing":
-                status_color = "orange"
-            
-            st.markdown(f"""
-            <div style="padding: 5px; margin-bottom: 5px; border-left: 3px solid {status_color};">
-                <strong>{file_info["name"]}</strong><br/>
-                <small>Status: {file_info["status"]}</small>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        # Show processed files
-        for i, file_info in enumerate(st.session_state.processed_files):
-            status_color = "green" if file_info["status"] == "completed" else "red"
-            
-            st.markdown(f"""
-            <div style="padding: 5px; margin-bottom: 5px; border-left: 3px solid {status_color};">
-                <strong>{file_info["name"]}</strong><br/>
-                <small>Status: {file_info["status"]}</small>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Show documents in database
-    st.subheader("Documents in Database")
-    
-    if st.session_state.neo4j_driver:
+        # Get current groups combining database groups and any pending new group
         with st.session_state.neo4j_driver.session() as session:
             result = session.run("""
             MATCH (d:Document)
-            RETURN d.id as id, d.name as name, d.created_at as created_at
-            ORDER BY d.created_at DESC
+            RETURN DISTINCT d.group as group
+            ORDER BY d.group
             """)
+            groups = [record["group"] for record in result]
+            if not groups:
+                groups = ["default"]
             
-            docs = [{"id": record["id"], "name": record["name"], "created_at": record["created_at"]} 
-                   for record in result]
+            # Add current group if it's not in the database yet
+            if st.session_state.current_group not in groups:
+                groups.append(st.session_state.current_group)
+        
+        # Ensure consistent group handling in sidebar
+        if st.session_state.current_group not in groups and st.session_state.current_group != "Create new group...":
+            st.session_state.current_group = "default"
+
+        # Group selector for upload with validation
+        selected_upload_group = st.selectbox(
+            "Select group for upload",
+            options=groups + ["Create new group..."],
+            key="upload_group",
+            index=groups.index(st.session_state.current_group) if st.session_state.current_group in groups else 0
+        )
+
+        # New group input with proper state handling
+        if selected_upload_group == "Create new group...":
+            new_group = st.text_input("Enter new group name")
+            if new_group and new_group.strip():
+                new_group = new_group.strip()
+                st.session_state.current_group = new_group
+                st.session_state.chat_histories[new_group] = []
+                st.experimental_rerun()
+        else:
+            st.session_state.current_group = selected_upload_group
+            if selected_upload_group not in st.session_state.chat_histories:
+                st.session_state.chat_histories[selected_upload_group] = []
             
-            if docs:
-                for doc in docs:
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.markdown(f"**{doc['name']}**")
-                    with col2:
-                        if st.button("Delete", key=f"del_{doc['id']}", type="secondary"):
-                            success, message = delete_document(doc['id'], doc['name'])
+            # File uploader with group selection
+            uploaded_files = st.file_uploader(
+                f"Upload documents to group: {st.session_state.current_group}",
+                type=["pdf", "txt", "docx", "csv"],
+                accept_multiple_files=True,
+                help="Upload PDF, TXT, DOCX, or CSV files to process"
+            )
+            
+            # Add files to queue when uploaded
+            if uploaded_files:
+                for file in uploaded_files:
+                    # Check if file is already in queue or processed
+                    file_names = [f["name"] for f in st.session_state.file_queue + st.session_state.processed_files]
+                    if file.name not in file_names:
+                        # Get file type from extension
+                        file_type = file.name.split(".")[-1].lower()
+                        if file_type not in ["pdf", "txt", "docx", "csv"]:
+                            file_type = "txt"  # Default to text
+                        
+                        # Add to queue
+                        st.session_state.file_queue.append({
+                            "name": file.name,
+                            "file": file,
+                            "type": file_type,
+                            "status": "queued",
+                            "message": "Waiting to be processed"
+                        })
+            
+            # Process queue button
+            if st.session_state.file_queue:
+                if not st.session_state.processing:
+                    if st.button("Process Queue", type="primary"):
+                        st.session_state.processing = True
+                        process_queue()
+                elif st.session_state.processing:
+                    # Add a spinner while processing
+                    with st.spinner(f"Processing {st.session_state.file_queue[0]['name']}..."):
+                        process_queue()
+            
+            # Show queue status
+            if st.session_state.file_queue or st.session_state.processed_files:
+                st.subheader("File Queue")
+            
+            # Show files in queue
+            for i, file_info in enumerate(st.session_state.file_queue):
+                status_color = "blue"
+                if file_info["status"] == "processing":
+                    status_color = "orange"
+                
+                st.markdown(f"""
+                <div style="padding: 5px; margin-bottom: 5px; border-left: 3px solid {status_color};">
+                    <strong>{file_info["name"]}</strong><br/>
+                    <small>Status: {file_info["status"]}</small>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Show processed files
+            for i, file_info in enumerate(st.session_state.processed_files):
+                status_color = "green" if file_info["status"] == "completed" else "red"
+                
+                st.markdown(f"""
+                <div style="padding: 5px; margin-bottom: 5px; border-left: 3px solid {status_color};">
+                    <strong>{file_info["name"]}</strong><br/>
+                    <small>Status: {file_info["status"]}</small>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Show documents in database
+            st.subheader("Documents in Database")
+            
+            with st.session_state.neo4j_driver.session() as session:
+                # Group documents by their groups
+                result = session.run("""
+                MATCH (d:Document)
+                RETURN d.id as id, d.name as name, d.group as group, d.created_at as created_at
+                ORDER BY d.group, d.created_at DESC
+                """)
+                
+                # Organize documents by group
+                docs_by_group = {}
+                for record in result:
+                    group = record["group"] or "default"
+                    if group not in docs_by_group:
+                        docs_by_group[group] = []
+                    docs_by_group[group].append({
+                        "id": record["id"],
+                        "name": record["name"],
+                        "created_at": record["created_at"]
+                    })
+                
+                st.subheader("Documents in Database")
+                if not docs_by_group:
+                    st.info("No documents in database. Upload documents to get started.")
+                for group in sorted(docs_by_group.keys()):
+                    st.subheader(group)
+                    for doc in docs_by_group[group]:
+                        st.markdown(f"📄 **{doc['name']}**")
+                        if st.button("🗑️", key=f"del_{doc['id']}"):
+                            success, msg = delete_document(doc['id'], doc['name'])
                             if success:
-                                st.success(message)
-                                st.rerun()
+                                st.success(msg)
+                                st.experimental_rerun()
                             else:
-                                st.error(message)
-            else:
-                st.info("No documents in database. Upload documents to get started.")
-    else:
-        st.error("Neo4j database is not connected. Please check your connection.")
+                                st.error(msg)
+                        st.markdown("---")
