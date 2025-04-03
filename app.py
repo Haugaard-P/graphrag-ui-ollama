@@ -21,7 +21,7 @@ from py2neo import Graph, Node, Relationship
 
 # Set page configuration with minimal UI for better performance
 st.set_page_config(
-    page_title="GraphRAG", 
+    page_title="FREAKSHOW Industries DocChat", 
     page_icon="fsi.jpg", 
     layout="wide",
     initial_sidebar_state="collapsed"  # Start with sidebar collapsed for faster loading
@@ -1338,12 +1338,15 @@ with st.sidebar:
                 for group in sorted(docs_by_group.keys()):
                     st.subheader(group)
                     for doc in docs_by_group[group]:
-                        st.markdown(f"📄 **{doc['name']}**")
-                        if st.button("🗑️", key=f"del_{doc['id']}"):
-                            success, msg = delete_document(doc['id'], doc['name'])
-                            if success:
-                                st.success(msg)
-                                st.experimental_rerun()
-                            else:
-                                st.error(msg)
+                        col1, col2 = st.columns([6, 1])
+                        with col1:
+                            st.markdown(f"📄 **{doc['name']}**")
+                        with col2:
+                            if st.button("🗑️", key=f"del_{doc['id']}", help=f"Delete {doc['name']}"):
+                                success, msg = delete_document(doc['id'], doc['name'])
+                                if success:
+                                    st.success(msg)
+                                    st.experimental_rerun()
+                                else:
+                                    st.error(msg)
                         st.markdown("---")
