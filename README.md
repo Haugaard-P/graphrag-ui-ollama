@@ -56,10 +56,32 @@ You can customize the application by modifying the following files:
 
 ### Environment Variables
 
-- `OLLAMA_BASE_URL`: URL of your Ollama instance
-- `NEO4J_URI`: URI for connecting to Neo4j
-- `NEO4J_USER`: Neo4j username
-- `NEO4J_PASSWORD`: Neo4j password
+1. Create a `.env` file in the root directory:
+```bash
+cp .env-example .env
+```
+
+2. Configure the following variables in your `.env` file:
+
+```env
+# Ollama Configuration
+OLLAMA_BASE_URL=http://your-ollama-ip:11434  # Replace with your Ollama instance URL
+MODEL=llama3.1                                # Specify the model you want to use
+
+# Neo4j Configuration
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=graphragpassword
+```
+
+#### Ollama Configuration Details:
+- `OLLAMA_BASE_URL`: The URL where your Ollama instance is running
+  - For local installations: `http://localhost:11434`
+  - For remote instances: `http://<ollama-ip>:11434`
+  - For Docker networks: Use the host machine IP if running in Docker
+- `MODEL`: The name of the Ollama model you want to use
+  - Must be a model that's already pulled in your Ollama instance
+  - Default: `llama3.1`
 
 ## Performance Optimization
 
